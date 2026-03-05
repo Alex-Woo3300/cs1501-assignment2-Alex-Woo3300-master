@@ -2,13 +2,11 @@ import java.util.*;
 
 public class DLBHotspotDetector implements HotspotDetector {
 
-    private Node root;
-
     private static class Node {
         char ch;
         Node child;
         Node sibling;
-        boolean isTerminal;
+        boolean terminal;
 
         int freq;
         int docFreq;
@@ -16,47 +14,73 @@ public class DLBHotspotDetector implements HotspotDetector {
         int middleCount;
         int endCount;
 
-        Node(char ch) {
-            this.ch = ch;
+        int lastDocSeen = -1;
+
+        Node(char c) {
+            this.ch = c;
         }
     }
 
-    private static class CandidateStats {
-        boolean atBegin = false;
-        boolean atEnd = false;
-        int middleCount = 0;
+    private Node root = new Node('\0');
+    private int docId = 0;
+
+    private Node getChild(Node node, char c) {
+        Node curr = node.child;
+        while (curr != null) {
+            if (curr.ch == c) return curr;
+            curr = curr.sibling;
+        }
+        return null;
+    }
+
+    private Node addChild(Node node, char c) {
+        Node n = new Node(c);
+        n.sibling = node.child;
+        node.child = n;
+        return n;
     }
 
     @Override
     public void addLeakedPassword(String leakedPassword, int minN, int maxN) {
-
         if (leakedPassword == null || minN < 1 || maxN < minN) {
             throw new IllegalArgumentException();
         }
 
-        int len = leakedPassword.length();
-        Set<String> seen = new HashSet<>();
+        docId++;
+        int L = leakedPassword.length();
 
-        for (int n = minN; n <= maxN; n++) {
-            for (int i = 0; i + n <= len; i++) {
+        for (int start = 0; start < L; start++) {
 
-                String sub = leakedPassword.substring(i, i + n);
+            Node curr = root;
 
-                boolean begin = (i == 0);
-                boolean end = (i + n == len);
-                boolean middle = (!begin && !end);
+            for (int len = 1; start + len <= L && len <= maxN; len++) {
 
-                Node node = insert(sub);
+                char c = leakedPassword.charAt(start + len - 1);
 
-                node.freq++;
+                Node next = getChild(curr, c);
+                if (next == null) {
+                    next = addChild(curr, c);
+                }
 
-                if (begin) node.beginCount++;
-                else if (end) node.endCount++;
-                else node.middleCount++;
+                curr = next;
 
-                if (!seen.contains(sub)) {
-                    node.docFreq++;
-                    seen.add(sub);
+                if (len >= minN) {
+
+                    curr.terminal = true;
+                    curr.freq++;
+
+                    if (curr.lastDocSeen != docId) {
+                        curr.docFreq++;
+                        curr.lastDocSeen = docId;
+                    }
+
+                    if (start == 0) {
+                        curr.beginCount++;
+                    } else if (start + len == L) {
+                        curr.endCount++;
+                    } else {
+                        curr.middleCount++;
+                    }
                 }
             }
         }
@@ -69,141 +93,56 @@ public class DLBHotspotDetector implements HotspotDetector {
             throw new IllegalArgumentException();
         }
 
-        Map<String, CandidateStats> map = new LinkedHashMap<>();
+        Map<String, Hotspot> results = new LinkedHashMap<>();
+        int L = candidatePassword.length();
 
-        int len = candidatePassword.length();
+        for (int start = 0; start < L; start++) {
 
-        for (int start = 0; start < len; start++) {
+            Node curr = root;
+            StringBuilder sb = new StringBuilder();
 
-            Node current = findNode(root, candidatePassword.charAt(start));
-            int pos = start;
+            for (int j = start; j < L; j++) {
 
-            while (current != null && pos < len) {
+                curr = getChild(curr, candidatePassword.charAt(j));
+                if (curr == null) break;
 
-                if (current.ch != candidatePassword.charAt(pos)) break;
+                sb.append(candidatePassword.charAt(j));
 
-                if (current.isTerminal) {
+                if (curr.terminal) {
 
-                    String sub = candidatePassword.substring(start, pos + 1);
+                    String ngram = sb.toString();
+                    boolean atBegin = start == 0;
+                    boolean atEnd = j == L - 1;
+                    boolean middle = !atBegin && !atEnd;
 
-                    CandidateStats stats = map.get(sub);
-                    if (stats == null) {
-                        stats = new CandidateStats();
-                        map.put(sub, stats);
+                    Hotspot h = results.get(ngram);
+
+                    if (h == null) {
+
+                        h = new Hotspot(
+                                ngram,
+                                curr.freq,
+                                curr.docFreq,
+                                curr.beginCount,
+                                curr.middleCount,
+                                curr.endCount,
+                                atBegin,
+                                middle ? 1 : 0,
+                                atEnd
+                        );
+
+                        results.put(ngram, h);
+
+                    } else {
+
+                        if (atBegin) h.candidateAtBegin = true;
+                        if (atEnd) h.candidateAtEnd = true;
+                        if (middle) h.candidateMiddleCount++;
                     }
-
-                    boolean begin = (start == 0);
-                    boolean end = (pos + 1 == len);
-                    boolean middle = (!begin && !end);
-
-                    if (begin) stats.atBegin = true;
-                    else if (end) stats.atEnd = true;
-                    else stats.middleCount++;
-                }
-
-                pos++;
-
-                if (pos < len) {
-                    current = findNode(current.child, candidatePassword.charAt(pos));
                 }
             }
         }
 
-        Set<Hotspot> result = new LinkedHashSet<>();
-
-        for (String sub : map.keySet()) {
-
-            Node node = search(sub);
-
-            CandidateStats cs = map.get(sub);
-
-            result.add(new Hotspot(
-                    sub,
-                    node.freq,
-                    node.docFreq,
-                    node.beginCount,
-                    node.middleCount,
-                    node.endCount,
-                    cs.atBegin,
-                    cs.middleCount,
-                    cs.atEnd
-            ));
-        }
-
-        return result;
-    }
-
-    private Node insert(String word) {
-
-        if (root == null) {
-            root = new Node(word.charAt(0));
-        }
-
-        Node current = root;
-
-        for (int i = 0; i < word.length(); i++) {
-
-            char c = word.charAt(i);
-
-            current = findOrCreate(current, c);
-
-            if (i == word.length() - 1) {
-                current.isTerminal = true;
-                return current;
-            }
-
-            if (current.child == null) {
-                current.child = new Node(word.charAt(i + 1));
-            }
-
-            current = current.child;
-        }
-
-        return current;
-    }
-
-    private Node findOrCreate(Node node, char c) {
-
-        Node prev = null;
-
-        while (node != null && node.ch != c) {
-            prev = node;
-            node = node.sibling;
-        }
-
-        if (node == null) {
-            node = new Node(c);
-            prev.sibling = node;
-        }
-
-        return node;
-    }
-
-    private Node findNode(Node node, char c) {
-
-        while (node != null) {
-            if (node.ch == c) return node;
-            node = node.sibling;
-        }
-
-        return null;
-    }
-
-    private Node search(String word) {
-
-        Node current = root;
-
-        for (int i = 0; i < word.length(); i++) {
-
-            current = findNode(current, word.charAt(i));
-
-            if (current == null) return null;
-
-            if (i < word.length() - 1) {
-                current = current.child;
-            }
-        }
-
-        return current;
+        return new LinkedHashSet<>(results.values());
     }
 }
